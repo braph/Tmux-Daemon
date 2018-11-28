@@ -1,0 +1,139 @@
+#!/usr/bin/env perl
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+=begin COPYRIGHT
+
+   tmux-daemon - extend tmux using perl
+   Copyright (C) 2016 Benjamin Abendroth
+   
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+   
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+   
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+=end COPYRIGHT
+
+=cut
+
+use strict;
+use warnings;
+use feature 'say';
+
+use Env qw($USER $HOME);
+use FindBin qw($Script $Bin);
+use File::Basename qw(dirname);
+use Getopt::Long qw(:config gnu_getopt auto_version);
+use Text::ParseWords qw(shellwords);
+use Data::Dump qw(dump);
+
+#use lib  $FindBin::Bin;
+#use lib "$FindBin::Bin/Tmux/Daemon/Plugins";
+#TODO: home?
+
+use Tmux::Daemon::Logging qw(info debug);
+use Tmux::Daemon::PluginSystem;
+use Tmux::Daemon::Commands::Bind;
+use Tmux::Daemon::Commands::Source;
+
+my %config = (
+   fifo       =>  "/dev/shm/$USER-tmux-perl.fifo",
+   pidfile    =>  "/dev/shm/$USER-tmux-perl.pid",
+   config     =>  "$HOME/.config/tmuxplugind.conf",
+   tmux_bin   =>  "/bin/tmux",
+   plugin_dir =>  "./plugins"
+);
+
+$Tmux::Daemon::Logging::level = 2;
+
+GetOptions(\%config,
+   'fifo|f=s',
+   'help|h'    => sub {
+      require Pod::Usage;
+      Pod::Usage::pod2usage(-exitstatus => 0, -verbose => 2);
+   }
+) or exit 1;
+
+if (! -p $config{fifo}) {
+   if (-e $config{config}) {
+      die "Could not remove old fifo file"
+         if system('rm', '-f', $config{fifo});
+   }
+
+   die "Could not create fifo"
+      if system('mkfifo', $config{fifo});
+}
+
+if (-e $config{pidfile}) {
+   open(my $fh, '<', $config{pidfile}) or die "$config{pidfile}: $!";
+   chomp($_ = <$fh>); 
+   close($fh);
+   kill 'USR1', $_;
+}
+
+fork and exit;
+
+open(my $fh, '>', $config{pidfile}) or die "$config{pidfile}: $!";
+print $fh $$;
+close($fh);
+
+my $plugin_system = Tmux::Daemon::PluginSystem->new();
+
+$SIG{INT} = 
+$SIG{TERM} = sub {
+   info("Exiting by signal");
+   $plugin_system->del();
+   exit;
+};
+
+$SIG{USR1} = sub {
+   info("Exiting by signal USR1");
+   exit;
+};
+
+Tmux::Daemon::Commands::Bind::init($plugin_system, \%config);
+Tmux::Daemon::Commands::Source::init($plugin_system, \%config);
+
+$plugin_system->register_command('plugin-load', sub { $plugin_system->load(@_) } );
+$plugin_system->register_command('bind', \&Tmux::Daemon::Commands::Bind::bind);
+$plugin_system->register_command('replace', sub {
+   debug("Command: replace $_[0]");
+   if ($_[0] != $$) {
+      info("Exiting (replaced) $_[0] != $$");
+      $plugin_system->del();
+      exit;
+   }
+   else {
+      info("Staying alive");
+   }
+});
+
+info("Loading config $config{config}");
+Tmux::Daemon::Commands::Source::source($config{config});
+
+info('starting loop ...');
+while() {
+   open(my $fh, '<', $config{fifo}) or do { warn $!; next };
+   my $line = readline($fh);
+   defined $line or next;
+   chomp($line);
+   $line or next;
+   close($fh);
+
+   my ($cmd, @args) = shellwords($line);
+   if ($cmd =~ s/^TMUX=(.*)/$1/) {
+      $ENV{TMUX} = $cmd;
+      ($cmd, @args) = @args;
+   }
+      
+   $plugin_system->call_command($cmd, @args);
+}

@@ -1,0 +1,6 @@
+Revision history for Perl extension Tmux::Daemon.
+
+0.01  Tue Nov 27 20:01:05 2018
+	- original version; created by h2xs 1.23 with options
+		-AX -n Tmux::Daemon
+

@@ -1,0 +1,6 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+t/Tmux-Daemon.t
+lib/Tmux/Daemon.pm
